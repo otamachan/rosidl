@@ -30,6 +30,8 @@ except ImportError:
 from rosidl_parser.definition import IdlLocator
 from rosidl_parser.parser import parse_idl_file
 
+from . import cache as rosidl_cache
+
 
 def convert_camel_case_to_lower_case_underscore(value):
     # insert an underscore before any upper case letter
@@ -68,6 +70,7 @@ def generate_files(
 
     latest_target_timestamp = get_newest_modification_time(args['target_dependencies'])
     generated_files = []
+    output_dir = args['output_dir']
 
     type_description_files = {}
     for description_tuple in args.get('type_description_tuples', []):
@@ -98,12 +101,35 @@ def generate_files(
         type_source_file = ros_interface_files.get(type_source_key, locator.get_absolute_path())
         if not keep_case:
             idl_stem = convert_camel_case_to_lower_case_underscore(idl_stem)
+
+        # Create output mapping (template_file -> rel_generated_file)
+        output_mapping = {}
+        for template_file, generated_filename in mapping.items():
+            rel_path = os.path.join(
+                str(idl_rel_path.parent),
+                generated_filename % idl_stem)
+            output_mapping[template_file] = rel_path
+
+        # Try to restore from cache if enabled
+        cache_info, output_files = rosidl_cache.restore_from_cache_if_exists(
+            idl_file_path=str(locator.get_absolute_path()),
+            generator_arguments_file=generator_arguments_file,
+            template_basepath=template_basepath,
+            output_mapping=output_mapping,
+            package_name=args['package_name'],
+            additional_context=additional_context,
+            output_dir=output_dir
+        )
+
+        if output_files:
+            generated_files.extend(output_files)
+            continue
+
+        # Cache miss or caching disabled - proceed with normal generation
         try:
             idl_file = parse_idl_file(locator)
-            for template_file, generated_filename in mapping.items():
-                generated_file = os.path.join(
-                    args['output_dir'], str(idl_rel_path.parent),
-                    generated_filename % idl_stem)
+            for template_file, rel_generated_file in output_mapping.items():
+                generated_file = os.path.join(output_dir, rel_generated_file)
                 generated_files.append(generated_file)
                 data = {
                     'package_name': args['package_name'],
@@ -119,6 +145,10 @@ def generate_files(
                     generated_file, minimum_timestamp=latest_target_timestamp,
                     template_basepath=template_basepath,
                     post_process_callback=post_process_callback)
+
+            # Save to cache after successful generation (if caching is enabled)
+            if cache_info:
+                rosidl_cache.save_to_cache(cache_info, output_dir)
         except Exception as e:
             print(
                 'Error processing idl file: ' +
